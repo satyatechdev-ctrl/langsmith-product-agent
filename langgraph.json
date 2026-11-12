@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "product_agent": "./src/product_agent/graph.py:make_graph"
+  },
+  "env": ".env"
+}

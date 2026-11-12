@@ -1,0 +1,91 @@
+name: Test and deploy product agent
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: product-agent-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Test and lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run tests
+        run: uv run --locked pytest
+
+      - name: Lint
+        run: uv run --locked ruff check src tests
+
+  deploy:
+    name: Deploy to LangSmith
+    needs: validate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Verify deployment secrets
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          EURON_API_KEY: ${{ secrets.EURON_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          test -n "$LANGSMITH_API_KEY" || { echo "::error::Configure LANGSMITH_API_KEY in the production environment."; exit 1; }
+          test -n "$EURON_API_KEY" || { echo "::error::Configure EURON_API_KEY in the production environment."; exit 1; }
+          test -n "$DATABASE_URL" || { echo "::error::Configure DATABASE_URL in the production environment."; exit 1; }
+
+      - name: Create deployment environment file
+        env:
+          EURON_API_KEY: ${{ secrets.EURON_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EURON_MODEL: ${{ vars.EURON_MODEL }}
+          EURON_BASE_URL: ${{ vars.EURON_BASE_URL }}
+        run: |
+          uv run --locked python -c "import os; from dotenv import set_key; [set_key('.env', key, value) for key, value in {'EURON_API_KEY': os.environ['EURON_API_KEY'], 'DATABASE_URL': os.environ['DATABASE_URL'], 'EURON_MODEL': os.getenv('EURON_MODEL') or 'euri-reasoning', 'EURON_BASE_URL': os.getenv('EURON_BASE_URL') or 'https://api.euron.one/api/v1/euri'}.items()]"
+
+      - name: Deploy to LangSmith
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+        run: >-
+          uv run --locked langgraph deploy
+          --name langsmith-product-agent
+          --deployment-type serverless
+          --no-input
+
+      - name: Remove temporary environment file
+        if: always()
+        run: rm -f .env
